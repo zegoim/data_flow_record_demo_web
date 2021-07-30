@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>数据流录制回放</title>
+    <link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css">
+    <link rel="stylesheet" href="assets/css/index.css">
+    <script src="https://unpkg.com/vue/dist/vue.js"></script>
+    <script src="https://unpkg.com/element-ui/lib/index.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+    <div class="header">
+        <div class="logo"></div>
+    </div>
+    <div class="content">
+        <div class="wrap">
+            <div class="title">数据流录制</div>
+            <div class="line"></div>
+            <ul class="list">
+                <li>
+                    <div class="left">切换环境：</div>
+                    <div class="right">
+                        <el-select @change="changeEnv" v-model="url" placeholder="请选择">
+                            <el-option
+                                    :key="1"
+                                    label="内网测服"
+                                    value="http://192.168.100.96:11001/get_play_info">
+                            </el-option>
+                            <el-option
+                                    :key="2"
+                                    label="外网测服"
+                                    value="https://cloudrecord-test.zego.im/get_play_info">
+                            </el-option>
+                        </el-select>
+                    </div>
+                </li>
+                <li v-for="item in list">
+                    <div class="left">{{ item.text }}:</div>
+                    <div class="right">
+                        <el-input v-model="item.value" placeholder="请输入taskID"></el-input>
+                    </div>
+                </li>
+                <li style="margin-top: 60px">
+                    <div class="left"></div>
+                    <div class="right">
+                        <el-button type="primary" v-on:click="confirm">开始回放</el-button>
+                    </div>
+                </li>
+            </ul>
+        </div>
+    </div>
+    <div class="mask" v-if="isOpenPlayback">
+        <div class="player-content" v-loading="loading">
+            <div class="close" v-on:click="closePlayback"></div>
+            <div class="player">
+                <div id="playback-content"></div>
+                <div class="control">
+                    <div class="process">
+                        <el-slider @change="seekTo" :format-tooltip="formatTooltip" :max="player.duration"
+                                   v-model="player.currentTime"></el-slider>
+                    </div>
+                    <div class="left">
+                        <span v-on:click="play">
+                            <span class="icon-play left" :class="{active: player.isPause}"></span>
+                            <span class="icon-play right" :class="{active: player.isPause}"></span>
+                        </span>
+                        <span>{{ secondToDate(player.currentTime) }} / {{ secondToDate(player.duration) }}</span>
+                    </div>
+                    <div class="right">
+                        <el-tooltip class="item" effect="dark" placement="top">
+                            <div slot="content">
+                                <el-slider v-model="player.volume" vertical height="80px"></el-slider>
+                            </div>
+                            <span class="voice" :class="[player.volume == 0 ? 'close' : 'open']"></span>
+                        </el-tooltip>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+<script src="https://cdn.bootcdn.net/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+<script src="./lib/ZegoExpressWhiteboardWeb.js"></script>
+<script src="./lib/ZegoExpressDocsWeb.js"></script>
+<script src="./lib/ZegoRecorderEngine.js"></script>
+<script src="biz.js"></script>
+<script>
+    new Vue({
+        el: '#app',
+        data: function () {
+            return {
+                isInit: false,
+                isOpenPlayback: false,
+                loading: false,
+                url: '',
+                list: [
+                    {type: 'task', text: 'taskID', value: ''}
+                ],
+                player: {
+                    isStart: false,
+                    isPause: true,
+                    process: 0,
+                    duration: 0,
+                    currentTime: 0,
+                    volume: 60
+                }
+            }
+        },
+        watch: {
+            'player.volume': function (e) {
+                playbackEngine.setVolume(e / 100);
+            }
+        },
+        async created() {
+            await this.init();
+        },
+        methods: {
+            changeEnv(e) {
+                this.url = e;
+                localStorage['zego-playback-url'] = e;
+            },
+            async init() {
+                this.url = localStorage.zegoServseUrl;
+                const token = await getToken();
+                initSDK(token);
+                initPlay();
+                zegoRecorderPlayback.on('playingProcess', e => {
+                    this.player.currentTime = e.second;
+                });
+                zegoRecorderPlayback.on('playStateUpdate', (e) => {
+                    if (e == 3) {
+                        this.player.isPause = true;
+                    }
+                })
+                zegoRecorderPlayback.on('customCommandUpdate', (e) => {
+                    this.$message(e);
+                })
+                this.isInit = true;
+                const task_id = localStorage.task_id;
+                task_id && this.$set(this.list[0], 'value', task_id);
+            },
+            async loadPlayInfo() {
+                const task_id = this.list[this.list.length - 1].value;
+                const playInfo = await getPlayInfo(task_id);
+                localStorage.task_id = task_id;
+                try {
+                    await zegoRecorderPlayback.load(playInfo);
+                    this.player.duration = Math.ceil(zegoRecorderPlayback.getTotalDuration() / 1000);
+                } catch (e) {
+                    console.error(e);
+                    this.closePlayback();
+                }
+            },
+            async confirm() {
+                if (!this.isInit) {
+                    await this.init();
+                }
+                try {
+                    this.loading = true;
+                    this.isOpenPlayback = true;
+                    await this.loadPlayInfo();
+                    zegoRecorderPlayback.setVolume(this.player.volume / 100);
+                    await this.play();
+                    this.loading = false;
+                } catch (e) {
+                    console.error(e);
+                    this.$message({
+                        message: `code: ${e.code}, message: ${e.message}`,
+                        type: 'error'
+                    });
+                }
+            },
+            secondToDate(val) {
+                const h = Math.floor(val / 3600) < 10 ? '0' + Math.floor(val / 3600) : Math.floor(val / 3600),
+                    m = Math.floor((val / 60 % 60)) < 10 ? '0' + Math.floor((val / 60 % 60)) : Math.floor((val / 60 % 60)),
+                    s = Math.floor((val % 60)) < 10 ? '0' + Math.floor((val % 60)) : Math.floor((val % 60));
+                return h + ':' + m + ':' + s;
+            },
+            formatTooltip(val) {
+                const p = val / this.player.duration;
+                const s = Math.floor(p * this.player.duration);
+                return this.secondToDate(s);
+            },
+            async play() {
+                this.player.isPause = !this.player.isPause;
+                if (!this.player.isStart) {
+                    await zegoRecorderPlayback.start();
+                    this.player.isStart = true;
+                } else {
+                    if (this.player.isPause) {
+                        zegoRecorderPlayback.pause();
+                    } else {
+                        await zegoRecorderPlayback.resume();
+                    }
+                }
+            },
+            closePlayback() {
+                zegoRecorderPlayback && zegoRecorderPlayback.unload();
+                this.isOpenPlayback = false;
+                this.$set(this, 'player', {
+                    isStart: false,
+                    isPause: true,
+                    process: 0,
+                    duration: 0,
+                    currentTime: 0,
+                    volume: 60
+                })
+            },
+            async seekTo(e) {
+                const s = e * 1000;
+                console.warn('seek', this.player.duration, e);
+                this.loading = true;
+                await zegoRecorderPlayback.seekTo(s);
+                if (this.player.isPause) {
+                    zegoRecorderPlayback.pause();
+                }
+                this.loading = false;
+            }
+        }
+    })
+</script>
+</html>
